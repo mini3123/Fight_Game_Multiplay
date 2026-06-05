@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>캐릭터 선택 - FIGHT ZONE</title>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0a0a0f; color: #e0e0e0;
+    font-family: 'Segoe UI', sans-serif;
+    min-height: 100vh;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+  }
+  h1 {
+    font-size: 2rem; font-weight: 900; letter-spacing: 0.15em;
+    color: #fff; text-shadow: 0 0 20px #b44aff; margin-bottom: 8px;
+  }
+  .subtitle { color: #777; font-size: 0.9rem; margin-bottom: 40px; }
+
+  .characters { display: flex; gap: 24px; margin-bottom: 40px; flex-wrap: wrap; justify-content: center; }
+
+  .char-card {
+    background: #13131f; border: 2px solid #2a2a40; border-radius: 16px;
+    padding: 28px 24px; width: 180px; text-align: center;
+    cursor: pointer; user-select: none;
+    transition: border-color 0.2s, transform 0.15s, box-shadow 0.2s;
+  }
+  .char-card:hover { transform: translateY(-4px); border-color: #666; box-shadow: 0 8px 30px rgba(0,0,0,.4); }
+  .char-card.selected {
+    border-color: var(--char-color);
+    box-shadow: 0 0 24px var(--char-color), 0 0 8px var(--char-color);
+  }
+
+  .char-canvas { display: block; margin: 0 auto 14px; border-radius: 8px; background: #0d0d1a; }
+  .char-name { font-size: 1.1rem; font-weight: 700; color: var(--char-color); margin-bottom: 6px; letter-spacing: .08em; }
+  .char-desc { font-size: 0.78rem; color: #666; }
+
+  .status-section { display: flex; gap: 40px; margin-bottom: 30px; font-size: .9rem; }
+  .player-status { text-align: center; }
+  .player-status .label { color: #666; margin-bottom: 4px; }
+  .player-status .val { font-weight: 700; font-size: 1rem; }
+  .player-status .val.waiting { color: #ff9800; animation: blink 1.2s infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  .confirm-btn {
+    padding: 14px 48px; font-size: 1rem; font-weight: 700; letter-spacing: .1em;
+    border: none; border-radius: 8px;
+    background: linear-gradient(135deg, #7b00d4, #b44aff);
+    color: #fff; cursor: pointer;
+    transition: filter .15s, transform .1s;
+    display: none;
+  }
+  .confirm-btn:hover { filter: brightness(1.15); transform: translateY(-1px); }
+  .confirm-btn:disabled { opacity: .4; cursor: not-allowed; }
+  .info-text { font-size: .82rem; color: #555; margin-top: 16px; }
+</style>
+</head>
+<body>
+
+<h1>캐릭터 선택</h1>
+<p class="subtitle">싸울 캐릭터를 선택하세요</p>
+
+<div class="characters">
+  <div class="char-card" id="card-Fighter" style="--char-color:#4FC3F7" onclick="selectChar('Fighter')">
+    <canvas class="char-canvas" id="canvas-Fighter" width="100" height="120"></canvas>
+    <div class="char-name">하원준</div>
+    <div class="char-desc">균형잡힌 전사</div>
+  </div>
+  <div class="char-card" id="card-Ninja" style="--char-color:#66BB6A" onclick="selectChar('Ninja')">
+    <canvas class="char-canvas" id="canvas-Ninja" width="100" height="120"></canvas>
+    <div class="char-name">전승우</div>
+    <div class="char-desc">빠른 닌자</div>
+  </div>
+  <div class="char-card" id="card-Boxer" style="--char-color:#EF5350" onclick="selectChar('Boxer')">
+    <canvas class="char-canvas" id="canvas-Boxer" width="100" height="120"></canvas>
+    <div class="char-name">조현우</div>
+    <div class="char-desc">강력한 복서</div>
+  </div>
+</div>
+
+<div class="status-section">
+  <div class="player-status">
+    <div class="label">P1</div>
+    <div class="val waiting" id="p1-status">선택 중</div>
+  </div>
+  <div class="player-status">
+    <div class="label">P2</div>
+    <div class="val waiting" id="p2-status">선택 중</div>
+  </div>
+</div>
+
+<button class="confirm-btn" id="confirm-btn" onclick="confirmSelect()">선택 완료</button>
+<p class="info-text" id="info-text">캐릭터를 선택한 뒤 확인 버튼을 누르세요.</p>
+
+<script>
+const COLORS = { Fighter: '#4FC3F7', Ninja: '#66BB6A', Boxer: '#EF5350' };
+
+const nickname  = sessionStorage.getItem('nickname')   || 'Player';
+const roomId    = sessionStorage.getItem('room_id')    || '';
+const playerNum = parseInt(sessionStorage.getItem('player_num') || '1');
+
+let selectedChar = null;
+const socket = io();
+
+socket.on('connect', () => {
+  socket.emit('reconnect_to_room', { room_id: roomId, player_num: playerNum, nickname });
+});
+
+// Server confirms we're still in select phase
+socket.on('character_select', () => {});
+
+socket.on('game_start', data => {
+  sessionStorage.setItem('player_num', String(data.player_num));
+  window.location.href = '/game.html';
+});
+
+socket.on('opponent_left', () => {
+  alert('상대방이 나갔습니다. 로비로 돌아갑니다.');
+  window.location.href = '/';
+});
+
+socket.on('error', () => {});
+
+// Draw character previews
+function drawPreview(name, color) {
+  const canvas = document.getElementById('canvas-' + name);
+  const ctx = canvas.getContext('2d');
+  const cx = 50;
+  ctx.clearRect(0, 0, 100, 120);
+
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(cx, 28, 14, 0, Math.PI * 2); ctx.fill();
+
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(cx - 5, 26, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx + 5, 26, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.arc(cx - 4, 27, 1.5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx + 6, 27, 1.5, 0, Math.PI * 2); ctx.fill();
+
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.roundRect(cx - 12, 42, 24, 36, 4); ctx.fill();
+
+  ctx.strokeStyle = color; ctx.lineWidth = 7; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(cx - 12, 50); ctx.lineTo(cx - 24, 66); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx + 12, 50); ctx.lineTo(cx + 24, 66); ctx.stroke();
+
+  ctx.lineWidth = 8;
+  ctx.beginPath(); ctx.moveTo(cx - 6, 78); ctx.lineTo(cx - 10, 100); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx + 6, 78); ctx.lineTo(cx + 10, 100); ctx.stroke();
+
+  ctx.fillStyle = 'rgba(0,0,0,.3)';
+  ctx.fillRect(cx - 12, 72, 24, 6);
+}
+
+['Fighter', 'Ninja', 'Boxer'].forEach(n => drawPreview(n, COLORS[n]));
+
+function selectChar(name) {
+  selectedChar = name;
+  document.querySelectorAll('.char-card').forEach(el => el.classList.remove('selected'));
+  document.getElementById('card-' + name).classList.add('selected');
+  document.getElementById('confirm-btn').style.display = 'inline-block';
+
+  const myStatus = document.getElementById(playerNum === 1 ? 'p1-status' : 'p2-status');
+  myStatus.textContent = name;
+  myStatus.className = 'val';
+  myStatus.style.color = COLORS[name];
+}
+
+function confirmSelect() {
+  if (!selectedChar) return;
+  document.getElementById('confirm-btn').disabled = true;
+  document.getElementById('info-text').textContent = '상대방이 선택할 때까지 기다리는 중...';
+  socket.emit('select_character', { character: selectedChar });
+}
+</script>
+</body>
+</html>

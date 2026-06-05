@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FIGHT ZONE - 1v1 온라인 격투</title>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0a0a0f;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  header {
+    width: 100%;
+    text-align: center;
+    padding: 28px 0 10px;
+    background: linear-gradient(180deg, #1a0030 0%, transparent 100%);
+  }
+  header h1 {
+    font-size: 3rem;
+    font-weight: 900;
+    letter-spacing: 0.18em;
+    color: #fff;
+    text-shadow: 0 0 30px #b44aff, 0 0 60px #6600cc;
+  }
+  header p { color: #888; font-size: 0.9rem; margin-top: 4px; }
+
+  .container {
+    display: flex;
+    gap: 24px;
+    padding: 30px 20px;
+    width: 100%;
+    max-width: 1000px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .card {
+    background: #13131f;
+    border: 1px solid #2a2a40;
+    border-radius: 12px;
+    padding: 24px;
+    flex: 1;
+    min-width: 280px;
+    max-width: 380px;
+  }
+  .card h2 {
+    font-size: 1.1rem;
+    color: #b44aff;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-bottom: 18px;
+    border-bottom: 1px solid #2a2a40;
+    padding-bottom: 10px;
+  }
+
+  input[type="text"] {
+    width: 100%;
+    background: #0d0d1a;
+    border: 1px solid #333;
+    border-radius: 6px;
+    color: #e0e0e0;
+    padding: 10px 14px;
+    font-size: 0.95rem;
+    margin-bottom: 10px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  input[type="text"]:focus { border-color: #b44aff; }
+  input[type="text"]::placeholder { color: #555; }
+
+  button {
+    width: 100%;
+    padding: 11px;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.95rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: filter 0.15s, transform 0.1s;
+    letter-spacing: 0.05em;
+  }
+  button:hover { filter: brightness(1.15); transform: translateY(-1px); }
+  button:active { transform: translateY(0); }
+  .btn-primary { background: linear-gradient(135deg, #7b00d4, #b44aff); color: #fff; margin-bottom: 8px; }
+  .btn-small {
+    width: auto; padding: 6px 14px; font-size: 0.8rem;
+    background: #2a2a40; color: #ccc; border: 1px solid #444; border-radius: 4px;
+  }
+
+  .room-id-box {
+    display: none;
+    margin-top: 14px;
+    background: #0d0d1a;
+    border: 1px solid #444;
+    border-radius: 8px;
+    padding: 12px 16px;
+  }
+  .room-id-box .label { font-size: 0.75rem; color: #888; margin-bottom: 4px; }
+  .room-id-box .room-code { font-size: 1.8rem; font-weight: 900; letter-spacing: 0.3em; color: #b44aff; }
+  .room-id-box .row { display: flex; align-items: center; justify-content: space-between; }
+  .waiting-text { font-size: 0.8rem; color: #888; margin-top: 8px; animation: blink 1.2s infinite; }
+  @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
+
+  .msg { font-size: 0.82rem; margin-top: 8px; min-height: 18px; }
+  .msg.error { color: #ff4444; }
+
+  .rank-wide { max-width: 560px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  th { color: #888; font-weight: 600; padding: 6px 10px; text-align: left; border-bottom: 1px solid #2a2a40; }
+  td { padding: 7px 10px; border-bottom: 1px solid #1e1e30; }
+  tr:hover td { background: #1a1a2a; }
+  .rank-num { color: #b44aff; font-weight: 700; width: 30px; }
+  .win-rate { color: #4caf50; font-weight: 600; }
+  .empty-row { color: #444; text-align: center; padding: 20px; }
+
+  .h-win { color: #4caf50; }
+  .h-loss { color: #f44336; }
+  .sep { height: 1px; background: #2a2a40; margin: 14px 0; }
+  .search-row { display: flex; gap: 8px; }
+  .search-row input { margin-bottom: 0; flex: 1; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⚡AJIN FIGHT ZONE</h1>
+  <p>아진 공식 야차룰 센터</p>
+</header>
+
+<div class="container">
+
+  <div class="card">
+    <h2>방 만들기</h2>
+    <input type="text" id="nick-create" placeholder="닉네임 (최대 20자)" maxlength="20">
+    <button class="btn-primary" onclick="createRoom()">방 만들기</button>
+    <div class="msg error" id="msg-create"></div>
+
+    <div class="room-id-box" id="room-box">
+      <div class="label">방 코드</div>
+      <div class="row">
+        <div class="room-code" id="room-code-display">------</div>
+        <button class="btn-small" onclick="copyRoomId()">복사</button>
+      </div>
+      <div class="waiting-text">상대방을 기다리는 중...</div>
+    </div>
+
+    <div class="sep"></div>
+
+    <h2>방 참가</h2>
+    <input type="text" id="nick-join" placeholder="닉네임" maxlength="20">
+    <input type="text" id="room-id-input" placeholder="방 코드 (6자리)" maxlength="6"
+           style="text-transform:uppercase;">
+    <button class="btn-primary" onclick="joinRoom()">방 참가하기</button>
+    <div class="msg error" id="msg-join"></div>
+  </div>
+
+  <div class="card rank-wide">
+    <h2>랭킹 (Top 10)</h2>
+    <table>
+      <thead>
+        <tr><th class="rank-num">#</th><th>닉네임</th><th>승</th><th>패</th><th>승률</th></tr>
+      </thead>
+      <tbody id="ranking-body">
+        <tr><td colspan="5" class="empty-row">불러오는 중...</td></tr>
+      </tbody>
+    </table>
+
+    <div class="sep"></div>
+
+    <h2 style="margin-bottom:10px;">전적 조회</h2>
+    <div class="search-row">
+      <input type="text" id="history-nick" placeholder="닉네임 검색" maxlength="20">
+      <button class="btn-small" style="white-space:nowrap;" onclick="searchHistory()">조회</button>
+    </div>
+    <table id="history-table" style="display:none; margin-top:10px;">
+      <thead>
+        <tr><th>날짜</th><th>상대</th><th>결과</th></tr>
+      </thead>
+      <tbody id="history-body"></tbody>
+    </table>
+    <div class="msg" id="msg-history"></div>
+  </div>
+
+</div>
+
+<script>
+const socket = io();
+let myNickname = '';
+let myRoomId = '';
+
+socket.on('connect', () => socket.emit('get_ranking'));
+socket.on('ranking', data => renderRanking(data.data));
+socket.on('history', data => renderHistory(data.data));
+
+socket.on('room_created', data => {
+  myRoomId = data.room_id;
+  sessionStorage.setItem('room_id', myRoomId);
+  sessionStorage.setItem('player_num', '1');
+  sessionStorage.setItem('nickname', myNickname);
+  document.getElementById('room-code-display').textContent = myRoomId;
+  document.getElementById('room-box').style.display = 'block';
+});
+
+socket.on('character_select', data => {
+  sessionStorage.setItem('player_num', String(data.player_num));
+  sessionStorage.setItem('nickname', myNickname);
+  window.location.href = '/select.html';
+});
+
+socket.on('error', data => {
+  document.getElementById('msg-join').textContent = data.msg;
+});
+
+function createRoom() {
+  const nick = document.getElementById('nick-create').value.trim();
+  if (!nick) { document.getElementById('msg-create').textContent = '닉네임을 입력해주세요.'; return; }
+  document.getElementById('msg-create').textContent = '';
+  myNickname = nick;
+  socket.emit('create_room', { nickname: nick });
+}
+
+function joinRoom() {
+  const nick = document.getElementById('nick-join').value.trim();
+  const roomId = document.getElementById('room-id-input').value.trim().toUpperCase();
+  if (!nick) { document.getElementById('msg-join').textContent = '닉네임을 입력해주세요.'; return; }
+  if (!roomId) { document.getElementById('msg-join').textContent = '방 코드를 입력해주세요.'; return; }
+  document.getElementById('msg-join').textContent = '';
+  myNickname = nick;
+  myRoomId = roomId;
+  sessionStorage.setItem('room_id', myRoomId);
+  sessionStorage.setItem('nickname', myNickname);
+  socket.emit('join_room', { nickname: nick, room_id: roomId });
+}
+
+function copyRoomId() {
+  navigator.clipboard.writeText(myRoomId).then(() => {
+    event.target.textContent = '복사됨!';
+    setTimeout(() => event.target.textContent = '복사', 1500);
+  });
+}
+
+function searchHistory() {
+  const nick = document.getElementById('history-nick').value.trim();
+  if (nick) socket.emit('get_history', { nickname: nick });
+}
+
+function renderRanking(rows) {
+  const tbody = document.getElementById('ranking-body');
+  if (!rows || !rows.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-row">아직 전적이 없습니다.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map((r, i) => `
+    <tr>
+      <td class="rank-num">${i + 1}</td>
+      <td>${esc(r.nickname)}</td>
+      <td>${r.wins}</td>
+      <td>${r.losses}</td>
+      <td class="win-rate">${r.win_rate}%</td>
+    </tr>`).join('');
+}
+
+function renderHistory(rows) {
+  const nick = document.getElementById('history-nick').value.trim();
+  const table = document.getElementById('history-table');
+  const msg   = document.getElementById('msg-history');
+  if (!rows || !rows.length) {
+    table.style.display = 'none';
+    msg.textContent = '전적이 없습니다.';
+    return;
+  }
+  table.style.display = 'table';
+  msg.textContent = '';
+  document.getElementById('history-body').innerHTML = rows.map(r => {
+    const isWin = r.winner === nick;
+    const opp   = r.player1 === nick ? r.player2 : r.player1;
+    const date  = (r.played_at || '').split('.')[0];
+    return `<tr>
+      <td style="font-size:.78rem;color:#666">${date}</td>
+      <td>${esc(opp)}</td>
+      <td class="${isWin ? 'h-win' : 'h-loss'}">${isWin ? '승리' : '패배'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+</body>
+</html>
