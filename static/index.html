@@ -92,6 +92,16 @@
     width: auto; padding: 6px 14px; font-size: 0.8rem;
     background: #2a2a40; color: #ccc; border: 1px solid #444; border-radius: 4px;
   }
+  .btn-solo { background: linear-gradient(135deg, #004d1a, #00aa44); color: #fff; margin-bottom: 8px; }
+  select.diff-select {
+    width: 100%; background: #0d0d1a; border: 1px solid #333; border-radius: 6px;
+    color: #e0e0e0; padding: 10px 14px; font-size: 0.95rem; margin-bottom: 10px;
+    outline: none; cursor: pointer;
+  }
+  select.diff-select:focus { border-color: #00aa44; }
+  .diff-easy   { color: #4caf50; }
+  .diff-normal { color: #ff9800; }
+  .diff-hard   { color: #f44336; }
 
   .room-id-box {
     display: none;
@@ -111,6 +121,42 @@
   .msg.error { color: #ff4444; }
 
   .rank-wide { max-width: 560px; }
+  .room-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px; border-bottom: 1px solid #1e1e30;
+    transition: background .15s;
+  }
+  .room-row:last-child { border-bottom: none; }
+  .room-row:hover { background: #1a1a2a; }
+  .room-players { font-size: .92rem; font-weight: 600; color: #e0e0e0; }
+  .room-meta { font-size: .75rem; color: #666; margin-top: 2px; }
+  .phase-badge {
+    display: inline-block; padding: 1px 7px; border-radius: 10px;
+    font-size: .68rem; font-weight: 700; margin-right: 4px;
+  }
+  .phase-waiting { background:#2a2a40; color:#888; }
+  .phase-select  { background:#1a2a10; color:#66BB6A; }
+  .phase-game    { background:#2a0010; color:#f44336; }
+  .btn-watch {
+    padding: 5px 14px; font-size: .78rem; font-weight: 700; border: none;
+    border-radius: 5px; background: linear-gradient(135deg,#004466,#0088cc);
+    color: #fff; cursor: pointer; white-space: nowrap;
+    transition: filter .15s;
+  }
+  .btn-watch:hover { filter: brightness(1.2); }
+  .empty-rooms { color: #444; text-align: center; padding: 20px; font-size: .85rem; }
+  .room-code-tag {
+    display: inline-block;
+    background: #1e1e30;
+    border: 1px solid #3a3a55;
+    border-radius: 4px;
+    padding: 0px 6px;
+    font-size: .72rem;
+    font-family: monospace;
+    letter-spacing: 0.12em;
+    color: #b44aff;
+    font-weight: 700;
+  }
   table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
   th { color: #888; font-weight: 600; padding: 6px 10px; text-align: left; border-bottom: 1px solid #2a2a40; }
   td { padding: 7px 10px; border-bottom: 1px solid #1e1e30; }
@@ -129,7 +175,7 @@
 <body>
 
 <header>
-  <h1>⚡AJIN FIGHT ZONE</h1>
+  <h1>⚡AJIN FIGHT ARENA</h1>
   <p>아진 공식 야차룰 센터</p>
 </header>
 
@@ -158,6 +204,23 @@
            style="text-transform:uppercase;">
     <button class="btn-primary" onclick="joinRoom()">방 참가하기</button>
     <div class="msg error" id="msg-join"></div>
+  </div>
+
+  <div class="card" style="max-width:280px;">
+    <h2>솔로 플레이 (vs 봇)</h2>
+    <input type="text" id="nick-solo" placeholder="닉네임 (최대 20자)" maxlength="20">
+    <select class="diff-select" id="difficulty">
+      <option value="easy">🟢 쉬움</option>
+      <option value="normal" selected>🟡 보통</option>
+      <option value="hard">🔴 어려움</option>
+    </select>
+    <button class="btn-solo" onclick="createSoloRoom()">봇과 대전 시작</button>
+    <div class="msg error" id="msg-solo"></div>
+  </div>
+
+  <div class="card" style="min-width:300px;max-width:400px;">
+    <h2>진행 중인 방 <span id="rooms-count" style="color:#555;font-size:.8rem;font-weight:400"></span></h2>
+    <div id="rooms-list"><div class="empty-rooms">불러오는 중...</div></div>
   </div>
 
   <div class="card rank-wide">
@@ -194,9 +257,59 @@ const socket = io();
 let myNickname = '';
 let myRoomId = '';
 
-socket.on('connect', () => socket.emit('get_ranking'));
+socket.on('connect', () => {
+  socket.emit('get_ranking');
+  socket.emit('get_rooms');
+});
 socket.on('ranking', data => renderRanking(data.data));
 socket.on('history', data => renderHistory(data.data));
+socket.on('rooms_list', data => renderRooms(data.rooms));
+
+// 3초마다 방 목록 갱신
+setInterval(() => socket.emit('get_rooms'), 3000);
+
+function spectateRoom(room_id) {
+  sessionStorage.setItem('room_id', room_id);
+  sessionStorage.setItem('player_num', '0');
+  sessionStorage.setItem('spectator', 'true');
+  sessionStorage.setItem('nickname', 'SPECTATOR');
+  window.location.href = '/game.html';
+}
+
+function renderRooms(rooms) {
+  const el    = document.getElementById('rooms-list');
+  const count = document.getElementById('rooms-count');
+  if (!rooms || !rooms.length) {
+    count.textContent = '';
+    el.innerHTML = '<div class="empty-rooms">진행 중인 방 없음</div>';
+    return;
+  }
+  count.textContent = `(${rooms.length})`;
+  const PHASE = { waiting: '대기', select: '선택 중', game: '게임 중' };
+  const PHASE_CLS = { waiting: 'phase-waiting', select: 'phase-select', game: 'phase-game' };
+  el.innerHTML = rooms.map(r => {
+    const cls   = PHASE_CLS[r.phase] || 'phase-waiting';
+    const label = PHASE[r.phase] || r.phase;
+    const vs    = r.solo ? `${esc(r.p1)} vs 🤖봇` : `${esc(r.p1)} vs ${esc(r.p2)}`;
+    const meta  = r.phase === 'game'
+      ? `${r.round}라운드 · ${r.scores[0]} - ${r.scores[1]}`
+      : '';
+    const watchBtn = r.phase === 'game'
+      ? `<button class="btn-watch" onclick="spectateRoom('${r.room_id}')">👁 관전</button>`
+      : '';
+    return `<div class="room-row">
+      <div>
+        <div class="room-players">
+          <span class="phase-badge ${cls}">${label}</span>${vs}
+        </div>
+        <div class="room-meta">
+          <span class="room-code-tag">${r.room_id}</span>${meta ? ` · ${meta}` : ''}
+        </div>
+      </div>
+      ${watchBtn}
+    </div>`;
+  }).join('');
+}
 
 socket.on('room_created', data => {
   myRoomId = data.room_id;
@@ -210,12 +323,23 @@ socket.on('room_created', data => {
 socket.on('character_select', data => {
   sessionStorage.setItem('player_num', String(data.player_num));
   sessionStorage.setItem('nickname', myNickname);
+  if (data.room_id) sessionStorage.setItem('room_id', data.room_id);
   window.location.href = '/select.html';
 });
 
 socket.on('error', data => {
   document.getElementById('msg-join').textContent = data.msg;
 });
+
+function createSoloRoom() {
+  const nick = document.getElementById('nick-solo').value.trim();
+  const diff = document.getElementById('difficulty').value;
+  if (!nick) { document.getElementById('msg-solo').textContent = '닉네임을 입력해주세요.'; return; }
+  document.getElementById('msg-solo').textContent = '';
+  myNickname = nick;
+  sessionStorage.setItem('nickname', nick);
+  socket.emit('create_solo_room', { nickname: nick, difficulty: diff });
+}
 
 function createRoom() {
   const nick = document.getElementById('nick-create').value.trim();
@@ -239,10 +363,28 @@ function joinRoom() {
 }
 
 function copyRoomId() {
-  navigator.clipboard.writeText(myRoomId).then(() => {
-    event.target.textContent = '복사됨!';
-    setTimeout(() => event.target.textContent = '복사', 1500);
-  });
+  const btn = event.target;
+  const done = () => {
+    btn.textContent = '복사됨!';
+    setTimeout(() => btn.textContent = '복사', 1500);
+  };
+
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(myRoomId).then(done).catch(() => fallbackCopy(done));
+  } else {
+    fallbackCopy(done);
+  }
+}
+
+function fallbackCopy(done) {
+  const el = document.createElement('textarea');
+  el.value = myRoomId;
+  el.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+  document.body.appendChild(el);
+  el.focus();
+  el.select();
+  try { document.execCommand('copy'); done(); } catch (e) {}
+  document.body.removeChild(el);
 }
 
 function searchHistory() {

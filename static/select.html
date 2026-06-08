@@ -36,7 +36,11 @@
 
   .char-canvas { display: block; margin: 0 auto 14px; border-radius: 8px; background: #0d0d1a; }
   .char-name { font-size: 1.1rem; font-weight: 700; color: var(--char-color); margin-bottom: 6px; letter-spacing: .08em; }
-  .char-desc { font-size: 0.78rem; color: #666; }
+  .char-desc { font-size: 0.78rem; color: #666; margin-bottom: 10px; }
+  .stat-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; font-size: 0.7rem; }
+  .stat-label { color: #666; width: 32px; text-align: right; flex-shrink: 0; }
+  .stat-bar-bg { flex: 1; height: 5px; background: #1e1e30; border-radius: 3px; overflow: hidden; }
+  .stat-bar-fill { height: 100%; border-radius: 3px; background: var(--char-color); transition: width .3s; }
 
   .status-section { display: flex; gap: 40px; margin-bottom: 30px; font-size: .9rem; }
   .player-status { text-align: center; }
@@ -56,6 +60,21 @@
   .confirm-btn:hover { filter: brightness(1.15); transform: translateY(-1px); }
   .confirm-btn:disabled { opacity: .4; cursor: not-allowed; }
   .info-text { font-size: .82rem; color: #555; margin-top: 16px; }
+
+  .bg-section { margin-bottom: 24px; text-align: center; }
+  .bg-section h3 { font-size: .85rem; color: #888; letter-spacing: .1em; text-transform: uppercase; margin-bottom: 12px; }
+  .bg-cards { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+  .bg-card {
+    cursor: pointer; border: 2px solid #2a2a40; border-radius: 10px; overflow: hidden;
+    transition: border-color .2s, transform .15s, box-shadow .2s;
+    user-select: none;
+  }
+  .bg-card:hover { transform: translateY(-3px); border-color: #555; }
+  .bg-card.selected { border-color: #b44aff; box-shadow: 0 0 16px #b44aff; }
+  .bg-card canvas { display: block; }
+  .bg-label { font-size: .72rem; color: #aaa; text-align: center; padding: 4px 0 5px; background: #13131f; }
+  .bg-locked { opacity: .45; cursor: default; }
+  .bg-locked:hover { transform: none; border-color: #2a2a40; }
 </style>
 </head>
 <body>
@@ -81,6 +100,28 @@
   </div>
 </div>
 
+<div class="bg-section" id="bg-section">
+  <h3 id="bg-title">배경 선택 (P1 전용)</h3>
+  <div class="bg-cards" id="bg-cards">
+    <div class="bg-card" id="bgcard-city"   onclick="selectBg('city')">
+      <canvas id="bgprev-city"   width="110" height="64"></canvas>
+      <div class="bg-label">도심</div>
+    </div>
+    <div class="bg-card" id="bgcard-desert" onclick="selectBg('desert')">
+      <canvas id="bgprev-desert" width="110" height="64"></canvas>
+      <div class="bg-label">사막</div>
+    </div>
+    <div class="bg-card" id="bgcard-space"  onclick="selectBg('space')">
+      <canvas id="bgprev-space"  width="110" height="64"></canvas>
+      <div class="bg-label">우주</div>
+    </div>
+    <div class="bg-card" id="bgcard-ice"    onclick="selectBg('ice')">
+      <canvas id="bgprev-ice"    width="110" height="64"></canvas>
+      <div class="bg-label">얼음</div>
+    </div>
+  </div>
+</div>
+
 <div class="status-section">
   <div class="player-status">
     <div class="label">P1</div>
@@ -96,21 +137,42 @@
 <p class="info-text" id="info-text">캐릭터를 선택한 뒤 확인 버튼을 누르세요.</p>
 
 <script>
-const COLORS = { Fighter: '#4FC3F7', Ninja: '#66BB6A', Boxer: '#EF5350' };
+const COLORS     = { Fighter: '#4FC3F7', Ninja: '#66BB6A', Boxer: '#EF5350' };
+const CHAR_NAMES = { Fighter: '하원준',   Ninja: '전승우',   Boxer: '조현우'  };
+const STATS = {
+  Fighter: { hp: 60, speed: 60, power: 60, cooldown: '10초' },
+  Ninja:   { hp: 45, speed: 95, power: 45, cooldown: '6초'  },
+  Boxer:   { hp: 90, speed: 35, power: 90, cooldown: '14초' },
+};
 
 const nickname  = sessionStorage.getItem('nickname')   || 'Player';
 const roomId    = sessionStorage.getItem('room_id')    || '';
 const playerNum = parseInt(sessionStorage.getItem('player_num') || '1');
 
-let selectedChar = null;
+let selectedChar  = null;
+let selectedBg    = 'city';
+let roomConnected = false;
+let isSolo        = false;
 const socket = io();
 
 socket.on('connect', () => {
   socket.emit('reconnect_to_room', { room_id: roomId, player_num: playerNum, nickname });
 });
 
-// Server confirms we're still in select phase
-socket.on('character_select', () => {});
+// 서버가 select 단계임을 확인
+socket.on('character_select', data => {
+  roomConnected = true;
+  if (data && data.solo) {
+    isSolo = true;
+    // P2 상태를 봇으로 표시
+    const opEl = document.getElementById('p2-status');
+    const diffLabel = {easy:'쉬움', normal:'보통', hard:'어려움'}[data.difficulty] || '';
+    opEl.textContent = `BOT (${diffLabel})`;
+    opEl.className = 'val';
+    opEl.style.color = '#888';
+    // 배경 선택 P1 전용 유지 (소로는 당연히 P1)
+  }
+});
 
 socket.on('game_start', data => {
   sessionStorage.setItem('player_num', String(data.player_num));
@@ -122,7 +184,31 @@ socket.on('opponent_left', () => {
   window.location.href = '/';
 });
 
-socket.on('error', () => {});
+// 상대방이 캐릭터를 고른 경우 실시간 표시
+socket.on('opponent_preview', data => {
+  const opNum   = data.player_num;  // 상대방의 player_num
+  const opChar  = data.character;
+  const opEl    = document.getElementById(opNum === 1 ? 'p1-status' : 'p2-status');
+  opEl.textContent = CHAR_NAMES[opChar] || opChar;
+  opEl.className   = 'val';
+  opEl.style.color = COLORS[opChar] || '#fff';
+});
+
+// 재연결 실패: 별도 이벤트로 처리 (error 이벤트는 무시)
+socket.on('reconnect_failed', () => {
+  document.querySelector('h1').textContent = '방 연결 실패';
+  document.querySelector('.subtitle').textContent = '방이 만료됐습니다. 로비로 돌아가세요.';
+  document.querySelector('.characters').style.display = 'none';
+  document.querySelector('.status-section').style.display = 'none';
+  const btn = document.createElement('button');
+  btn.className = 'confirm-btn';
+  btn.style.display = 'inline-block';
+  btn.textContent = '로비로 돌아가기';
+  btn.onclick = () => window.location.href = '/';
+  document.querySelector('.info-text').replaceWith(btn);
+});
+
+socket.on('error', () => {}); // 그 외 에러 무시
 
 // Draw character previews
 function drawPreview(name, color) {
@@ -156,7 +242,119 @@ function drawPreview(name, color) {
   ctx.fillRect(cx - 12, 72, 24, 6);
 }
 
-['Fighter', 'Ninja', 'Boxer'].forEach(n => drawPreview(n, COLORS[n]));
+['Fighter', 'Ninja', 'Boxer'].forEach(n => {
+  drawPreview(n, COLORS[n]);
+  drawStats(n);
+});
+
+// 배경 미리보기 그리기
+drawBgPreview('city');
+drawBgPreview('desert');
+drawBgPreview('space');
+drawBgPreview('ice');
+
+// P2는 배경 선택 불가 (잠금)
+if (playerNum !== 1) {
+  document.querySelectorAll('.bg-card').forEach(el => el.classList.add('bg-locked'));
+  document.getElementById('bg-title').textContent = 'P1이 배경을 선택 중...';
+}
+// 기본 선택 표시
+document.getElementById('bgcard-city').classList.add('selected');
+
+function selectBg(name) {
+  if (playerNum !== 1) return;
+  selectedBg = name;
+  document.querySelectorAll('.bg-card').forEach(el => el.classList.remove('selected'));
+  document.getElementById('bgcard-' + name).classList.add('selected');
+}
+
+function drawBgPreview(name) {
+  const canvas = document.getElementById('bgprev-' + name);
+  const c = canvas.getContext('2d');
+  const W = 110, H = 64, FY = 44;
+
+  if (name === 'city') {
+    const g = c.createLinearGradient(0,0,0,FY);
+    g.addColorStop(0,'#0d0020'); g.addColorStop(1,'#1a0035');
+    c.fillStyle = g; c.fillRect(0,0,W,FY);
+    c.fillStyle = '#120024'; c.fillRect(0,FY,W,H-FY);
+    c.strokeStyle = '#b44aff'; c.lineWidth = 1.5;
+    c.shadowColor = '#b44aff'; c.shadowBlur = 6;
+    c.beginPath(); c.moveTo(0,FY); c.lineTo(W,FY); c.stroke();
+    c.shadowBlur = 0;
+    c.strokeStyle = 'rgba(180,74,255,0.12)'; c.lineWidth = 1;
+    for(let x=0;x<W;x+=14){c.beginPath();c.moveTo(x,FY);c.lineTo(x,H);c.stroke();}
+
+  } else if (name === 'desert') {
+    const g = c.createLinearGradient(0,0,0,FY);
+    g.addColorStop(0,'#1a0800'); g.addColorStop(1,'#c45a00');
+    c.fillStyle = g; c.fillRect(0,0,W,FY);
+    c.save(); c.shadowColor='#ffaa00'; c.shadowBlur=14;
+    c.fillStyle='#ffcc44'; c.beginPath(); c.arc(85,14,12,0,Math.PI*2); c.fill();
+    c.restore();
+    const sg = c.createLinearGradient(0,FY,0,H);
+    sg.addColorStop(0,'#c87820'); sg.addColorStop(1,'#8b4f10');
+    c.fillStyle = sg; c.fillRect(0,FY,W,H-FY);
+    c.strokeStyle='#e8a030'; c.lineWidth=1.5;
+    c.shadowColor='#e8a030'; c.shadowBlur=5;
+    c.beginPath(); c.moveTo(0,FY); c.lineTo(W,FY); c.stroke();
+    c.shadowBlur=0;
+
+  } else if (name === 'space') {
+    c.fillStyle='#00000f'; c.fillRect(0,0,W,FY);
+    c.fillStyle='#fff';
+    [[8,6],[25,18],[50,8],[70,22],[95,12],[105,28],[30,35],[60,30],[80,38]].forEach(([x,y])=>{
+      c.beginPath(); c.arc(x,y,0.8,0,Math.PI*2); c.fill();
+    });
+    c.save(); c.shadowColor='#4488ff'; c.shadowBlur=8;
+    const pg=c.createRadialGradient(88,16,2,88,16,14);
+    pg.addColorStop(0,'#6699ff'); pg.addColorStop(1,'#112244');
+    c.fillStyle=pg; c.beginPath(); c.arc(88,16,14,0,Math.PI*2); c.fill();
+    c.restore();
+    c.fillStyle='#0a0a1a'; c.fillRect(0,FY,W,H-FY);
+    c.strokeStyle='#3366cc'; c.lineWidth=1.5;
+    c.shadowColor='#3366cc'; c.shadowBlur=6;
+    c.beginPath(); c.moveTo(0,FY); c.lineTo(W,FY); c.stroke();
+    c.shadowBlur=0;
+
+  } else if (name === 'ice') {
+    const g = c.createLinearGradient(0,0,0,FY);
+    g.addColorStop(0,'#001830'); g.addColorStop(1,'#003060');
+    c.fillStyle=g; c.fillRect(0,0,W,FY);
+    c.fillStyle='rgba(150,220,255,0.5)';
+    [10,30,55,75,98].forEach(x=>{
+      const h=8+(x%18); c.beginPath();
+      c.moveTo(x-4,0); c.lineTo(x+4,0); c.lineTo(x,h); c.closePath(); c.fill();
+    });
+    const ig=c.createLinearGradient(0,FY,0,H);
+    ig.addColorStop(0,'#a0d8f0'); ig.addColorStop(1,'#3090c0');
+    c.fillStyle=ig; c.fillRect(0,FY,W,H-FY);
+    c.strokeStyle='#cceeff'; c.lineWidth=1.5;
+    c.shadowColor='#88ccff'; c.shadowBlur=6;
+    c.beginPath(); c.moveTo(0,FY); c.lineTo(W,FY); c.stroke();
+    c.shadowBlur=0;
+  }
+}
+
+function drawStats(name) {
+  const card = document.getElementById('card-' + name);
+  const s = STATS[name];
+  const color = COLORS[name];
+  const rows = [
+    { label: 'HP',   pct: s.hp },
+    { label: '속도', pct: s.speed },
+    { label: '공격', pct: s.power },
+  ];
+  const html = rows.map(r => `
+    <div class="stat-row">
+      <span class="stat-label">${r.label}</span>
+      <div class="stat-bar-bg">
+        <div class="stat-bar-fill" style="width:${r.pct}%"></div>
+      </div>
+    </div>`).join('') +
+    `<div style="font-size:0.68rem;color:#555;margin-top:4px;text-align:left;padding-left:38px">필살기 ${s.cooldown}</div>`;
+  card.insertAdjacentHTML('beforeend', html);
+}
 
 function selectChar(name) {
   selectedChar = name;
@@ -164,17 +362,28 @@ function selectChar(name) {
   document.getElementById('card-' + name).classList.add('selected');
   document.getElementById('confirm-btn').style.display = 'inline-block';
 
-  const myStatus = document.getElementById(playerNum === 1 ? 'p1-status' : 'p2-status');
-  myStatus.textContent = name;
-  myStatus.className = 'val';
-  myStatus.style.color = COLORS[name];
+  // 내 상태 표시 (한국어 이름)
+  const myEl = document.getElementById(playerNum === 1 ? 'p1-status' : 'p2-status');
+  myEl.textContent = CHAR_NAMES[name] || name;
+  myEl.className   = 'val';
+  myEl.style.color = COLORS[name];
+
+  // 상대방에게 내가 뭘 고르고 있는지 실시간 전송
+  if (roomConnected) {
+    socket.emit('preview_character', { character: name });
+  }
 }
 
 function confirmSelect() {
   if (!selectedChar) return;
+  if (!roomConnected) {
+    alert('방 연결이 끊겼습니다. 로비로 돌아갑니다.');
+    window.location.href = '/';
+    return;
+  }
   document.getElementById('confirm-btn').disabled = true;
   document.getElementById('info-text').textContent = '상대방이 선택할 때까지 기다리는 중...';
-  socket.emit('select_character', { character: selectedChar });
+  socket.emit('select_character', { character: selectedChar, background: selectedBg });
 }
 </script>
 </body>

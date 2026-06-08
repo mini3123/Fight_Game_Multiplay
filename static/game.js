@@ -12,8 +12,49 @@ const nickname  = sessionStorage.getItem('nickname')   || 'Player';
 const roomId    = sessionStorage.getItem('room_id')    || '';
 let myPlayerNum = parseInt(sessionStorage.getItem('player_num') || '1');
 
-let gameState = null;
+let serverState  = null;
+let gameState    = null;
 let roundOverTimer = null;
+let gameBg       = 'city';
+const isSpectator = sessionStorage.getItem('spectator') === 'true';
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function deepCopy(obj) { return JSON.parse(JSON.stringify(obj)); }
+
+// rAF 기반 60fps 렌더 루프 (서버 30fps 패킷 → 부드러운 보간)
+function rafLoop() {
+  if (serverState) {
+    if (!gameState) {
+      gameState = deepCopy(serverState);
+    } else {
+      // 위치만 보간, 나머지 상태는 즉시 반영
+      serverState.players.forEach((sp, i) => {
+        const dp = gameState.players[i];
+        if (!dp) return;
+        dp.x = lerp(dp.x, sp.x, 0.4);
+        dp.y = lerp(dp.y, sp.y, 0.4);
+        dp.state    = sp.state;
+        dp.facing   = sp.facing;
+        dp.hp       = sp.hp;
+        dp.max_hp   = sp.max_hp;
+        dp.anim_tick = sp.anim_tick;
+        dp.color    = sp.color;
+        dp.character = sp.character;
+        dp.nickname = sp.nickname;
+        dp.special_cooldown      = sp.special_cooldown;
+        dp.special_cooldown_time = sp.special_cooldown_time;
+      });
+      gameState.timer       = serverState.timer;
+      gameState.round       = serverState.round;
+      gameState.scores      = serverState.scores;
+      gameState.projectiles = serverState.projectiles;
+    }
+    render();
+  }
+  requestAnimationFrame(rafLoop);
+}
+requestAnimationFrame(rafLoop);
 
 // --- Input ---
 const keys = { left: false, right: false, jump: false, down: false, z: false, x: false, c: false };
@@ -37,26 +78,98 @@ document.addEventListener('keyup', e => {
   if (e.code === 'KeyC')       keys.c = false;
 });
 
-// Send input at 20 FPS
-setInterval(() => socket.emit('player_input', { keys }), 1000 / 20);
+// 관전자는 입력 전송 안 함
+if (!isSpectator) {
+  setInterval(() => socket.emit('player_input', { keys }), 1000 / 20);
+}
+
+// ============================================================
+// Chat
+// ============================================================
+
+const chatMsgs = document.getElementById('chat-msgs');
+const chatIn   = document.getElementById('chat-in');
+const chatBtn  = document.getElementById('chat-btn');
+
+const PLAYER_COLORS = ['#4FC3F7', '#66BB6A', '#EF5350'];
+
+function appendChat(line, cls) {
+  const el = document.createElement('div');
+  el.className = 'chat-line' + (cls ? ' ' + cls : '');
+  el.innerHTML = line;
+  chatMsgs.appendChild(el);
+  chatMsgs.scrollTop = chatMsgs.scrollHeight;
+  // 메시지 최대 150줄 유지
+  while (chatMsgs.children.length > 150) chatMsgs.removeChild(chatMsgs.firstChild);
+}
+
+function sendChat() {
+  const msg = chatIn.value.trim();
+  if (!msg) return;
+  socket.emit('chat_message', { msg });
+  chatIn.value = '';
+}
+
+if (isSpectator) {
+  chatIn.placeholder = '관전자는 채팅에 참여할 수 없습니다';
+  chatIn.disabled = true;
+  chatBtn.disabled = true;
+}
+
+chatBtn.addEventListener('click', sendChat);
+
+chatIn.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); sendChat(); }
+  if (e.key === 'Escape') { chatIn.blur(); }
+  // 채팅 입력 중엔 게임 키 차단
+  e.stopPropagation();
+});
+
+// Enter 키로 채팅창 포커스 (게임 키 처리 전에 확인)
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && document.activeElement !== chatIn) {
+    e.preventDefault();
+    chatIn.focus();
+  }
+}, true);
+
+socket.on('chat_message', data => {
+  const color = PLAYER_COLORS[(data.player_num - 1)] || '#aaa';
+  const nick  = data.nickname.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const msg   = data.msg.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  appendChat(`<span style="color:${color};font-weight:700">${nick}</span>: ${msg}`);
+});
 
 // ============================================================
 // Socket events
 // ============================================================
 
 socket.on('connect', () => {
-  socket.emit('reconnect_to_room', { room_id: roomId, player_num: myPlayerNum, nickname });
+  if (isSpectator) {
+    socket.emit('spectate', { room_id: roomId });
+  } else {
+    socket.emit('reconnect_to_room', { room_id: roomId, player_num: myPlayerNum, nickname });
+  }
 });
 
 socket.on('game_start', data => {
   myPlayerNum = data.player_num;
+  gameBg = data.background || 'city';
   sessionStorage.setItem('player_num', myPlayerNum);
   hideOverlay();
+  if (data.spectator) {
+    // 관전 모드: 상단에 배지 표시
+    const hint = document.getElementById('key-hint');
+    if (hint) hint.textContent = `👁 관전 중 — ${data.p1_nick} vs ${data.p2_nick}`;
+  }
+});
+
+socket.on('spec_error', data => {
+  showOverlayFinal('관전 불가', data.msg || '게임이 이미 종료되었습니다.');
 });
 
 socket.on('game_state', data => {
-  gameState = data;
-  render();
+  serverState = data;
 });
 
 socket.on('round_end', data => {
@@ -116,6 +229,7 @@ function render() {
   if (!gameState) return;
   ctx.clearRect(0, 0, W, H);
   drawBackground();
+  drawProjectiles();
   drawHUD();
   gameState.players.forEach(p => drawCharacter(ctx, p));
   drawSpecialCooldowns();
@@ -123,33 +237,153 @@ function render() {
 
 // ---- Background ----
 function drawBackground() {
-  const grad = ctx.createLinearGradient(0, 0, 0, FLOOR_Y);
-  grad.addColorStop(0, '#0d0020');
-  grad.addColorStop(1, '#1a0035');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, W, FLOOR_Y);
+  switch (gameBg) {
+    case 'desert': drawBgDesert(); break;
+    case 'space':  drawBgSpace();  break;
+    case 'ice':    drawBgIce();    break;
+    default:       drawBgCity();   break;
+  }
+}
 
-  ctx.fillStyle = '#120024';
-  ctx.fillRect(0, FLOOR_Y, W, H - FLOOR_Y);
-
-  ctx.strokeStyle = '#b44aff';
-  ctx.lineWidth = 2;
-  ctx.shadowColor = '#b44aff';
-  ctx.shadowBlur = 12;
+function floorLine(color, blur) {
+  ctx.strokeStyle = color; ctx.lineWidth = 2;
+  ctx.shadowColor = color; ctx.shadowBlur = blur;
   ctx.beginPath(); ctx.moveTo(0, FLOOR_Y); ctx.lineTo(W, FLOOR_Y); ctx.stroke();
   ctx.shadowBlur = 0;
+}
 
-  ctx.strokeStyle = 'rgba(180,74,255,0.07)';
-  ctx.lineWidth = 1;
-  for (let x = 0; x < W; x += 40) {
-    ctx.beginPath(); ctx.moveTo(x, FLOOR_Y); ctx.lineTo(x, H); ctx.stroke();
-  }
-  for (let y = FLOOR_Y; y < H; y += 30) {
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-  }
-
+function drawBgCity() {
+  const g = ctx.createLinearGradient(0, 0, 0, FLOOR_Y);
+  g.addColorStop(0, '#0d0020'); g.addColorStop(1, '#1a0035');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, FLOOR_Y);
+  ctx.fillStyle = '#120024'; ctx.fillRect(0, FLOOR_Y, W, H - FLOOR_Y);
+  floorLine('#b44aff', 12);
+  ctx.strokeStyle = 'rgba(180,74,255,0.07)'; ctx.lineWidth = 1;
+  for (let x = 0; x < W; x += 40) { ctx.beginPath(); ctx.moveTo(x, FLOOR_Y); ctx.lineTo(x, H); ctx.stroke(); }
+  for (let y = FLOOR_Y; y < H; y += 30) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
   drawGlow(200, 280, 100, 'rgba(100,0,255,0.07)');
   drawGlow(600, 280, 100, 'rgba(100,0,255,0.07)');
+}
+
+function drawBgDesert() {
+  const sky = ctx.createLinearGradient(0, 0, 0, FLOOR_Y);
+  sky.addColorStop(0, '#180500'); sky.addColorStop(0.5, '#6b2f00'); sky.addColorStop(1, '#bf5800');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, FLOOR_Y);
+
+  // 태양
+  ctx.save();
+  ctx.shadowColor = '#ffaa00'; ctx.shadowBlur = 50;
+  const sunG = ctx.createRadialGradient(660, 70, 0, 660, 70, 48);
+  sunG.addColorStop(0, '#fff4a0'); sunG.addColorStop(1, '#ff8800');
+  ctx.fillStyle = sunG; ctx.beginPath(); ctx.arc(660, 70, 48, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+
+  // 모래 언덕 실루엣
+  ctx.fillStyle = 'rgba(120,55,5,0.5)';
+  ctx.beginPath(); ctx.moveTo(0, FLOOR_Y);
+  ctx.bezierCurveTo(100, FLOOR_Y - 70, 250, FLOOR_Y - 80, 400, FLOOR_Y - 30);
+  ctx.bezierCurveTo(550, FLOOR_Y + 20, 680, FLOOR_Y - 55, 800, FLOOR_Y);
+  ctx.closePath(); ctx.fill();
+
+  const sand = ctx.createLinearGradient(0, FLOOR_Y, 0, H);
+  sand.addColorStop(0, '#c87820'); sand.addColorStop(1, '#7a3f08');
+  ctx.fillStyle = sand; ctx.fillRect(0, FLOOR_Y, W, H - FLOOR_Y);
+  floorLine('#e8a030', 8);
+
+  ctx.strokeStyle = 'rgba(255,180,80,0.12)'; ctx.lineWidth = 1;
+  for (let y = FLOOR_Y + 18; y < H; y += 18) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+}
+
+function drawBgSpace() {
+  ctx.fillStyle = '#00000c'; ctx.fillRect(0, 0, W, FLOOR_Y);
+
+  // 별
+  ctx.fillStyle = '#ffffff';
+  const stars = [[40,25],[90,12],[160,38],[220,8],[300,28],[380,14],[460,32],[530,7],[610,22],
+                 [680,40],[740,16],[770,33],[55,55],[130,48],[210,60],[330,52],[450,58],[570,45],[700,60]];
+  stars.forEach(([x, y]) => {
+    ctx.beginPath(); ctx.arc(x, y, y % 5 < 2 ? 1.5 : 0.8, 0, Math.PI * 2); ctx.fill();
+  });
+
+  // 성운
+  drawGlow(180, 140, 140, 'rgba(100,0,180,0.1)');
+  drawGlow(580, 90, 110, 'rgba(0,60,200,0.09)');
+
+  // 행성
+  ctx.save(); ctx.shadowColor = '#4488ff'; ctx.shadowBlur = 24;
+  const pg = ctx.createRadialGradient(700, 60, 4, 700, 60, 52);
+  pg.addColorStop(0, '#88aaff'); pg.addColorStop(0.6, '#3366cc'); pg.addColorStop(1, '#0a1a44');
+  ctx.fillStyle = pg; ctx.beginPath(); ctx.arc(700, 60, 52, 0, Math.PI * 2); ctx.fill();
+  // 행성 고리
+  ctx.strokeStyle = 'rgba(180,200,255,0.35)'; ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.ellipse(700, 60, 72, 16, -0.3, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+
+  ctx.fillStyle = '#07070f'; ctx.fillRect(0, FLOOR_Y, W, H - FLOOR_Y);
+  floorLine('#3366cc', 10);
+  ctx.strokeStyle = 'rgba(50,100,200,0.07)'; ctx.lineWidth = 1;
+  for (let x = 0; x < W; x += 50) { ctx.beginPath(); ctx.moveTo(x, FLOOR_Y); ctx.lineTo(x, H); ctx.stroke(); }
+}
+
+function drawBgIce() {
+  const sky = ctx.createLinearGradient(0, 0, 0, FLOOR_Y);
+  sky.addColorStop(0, '#001020'); sky.addColorStop(1, '#002848');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, FLOOR_Y);
+
+  // 오로라
+  drawGlow(400, 100, 200, 'rgba(0,200,160,0.07)');
+  drawGlow(200, 80, 160, 'rgba(80,100,255,0.06)');
+
+  // 고드름
+  ctx.fillStyle = 'rgba(180,235,255,0.55)';
+  [30, 80, 145, 210, 290, 370, 450, 530, 610, 690, 755].forEach(x => {
+    const h = 25 + (x * 7 % 35);
+    ctx.beginPath(); ctx.moveTo(x - 7, 0); ctx.lineTo(x + 7, 0); ctx.lineTo(x, h); ctx.closePath(); ctx.fill();
+  });
+
+  const iceG = ctx.createLinearGradient(0, FLOOR_Y, 0, H);
+  iceG.addColorStop(0, '#b0e0f8'); iceG.addColorStop(1, '#2880b0');
+  ctx.fillStyle = iceG; ctx.fillRect(0, FLOOR_Y, W, H - FLOOR_Y);
+  floorLine('#cceeff', 14);
+
+  // 얼음 균열
+  ctx.strokeStyle = 'rgba(200,240,255,0.22)'; ctx.lineWidth = 1;
+  [[60, FLOOR_Y+6, 140, FLOOR_Y+22], [220, FLOOR_Y+4, 300, FLOOR_Y+18],
+   [400, FLOOR_Y+8, 520, FLOOR_Y+26], [590, FLOOR_Y+5, 660, FLOOR_Y+19],
+   [710, FLOOR_Y+7, 780, FLOOR_Y+20]].forEach(([x1,y1,x2,y2]) => {
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  });
+
+  drawGlow(400, 250, 160, 'rgba(80,180,255,0.05)');
+}
+
+function drawProjectiles() {
+  const projs = gameState.projectiles;
+  if (!projs || !projs.length) return;
+  projs.forEach(proj => {
+    const [r, g, b] = hexRgb(proj.color);
+    ctx.save();
+    ctx.shadowColor = proj.color;
+    ctx.shadowBlur = 22;
+    // 외곽 링 3개
+    for (let i = 3; i >= 1; i--) {
+      ctx.strokeStyle = `rgba(${r},${g},${b},${0.25 * i})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(proj.x, proj.y, 7 + i * 6, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    // 코어 그라디언트
+    const grad = ctx.createRadialGradient(proj.x, proj.y, 0, proj.x, proj.y, 13);
+    grad.addColorStop(0, '#fff');
+    grad.addColorStop(0.35, proj.color);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(proj.x, proj.y, 13, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  });
 }
 
 function drawGlow(x, y, r, color) {
@@ -180,7 +414,7 @@ function drawHUD() {
 
 function drawHpBar(x, y, width, player, reversed) {
   const hp = Math.max(0, player.hp);
-  const pct = hp / 100;
+  const pct = hp / (player.max_hp || 100);
 
   ctx.font = 'bold 13px "Segoe UI"';
   ctx.fillStyle = '#ccc';
@@ -200,7 +434,7 @@ function drawHpBar(x, y, width, player, reversed) {
 
   ctx.font = 'bold 10px monospace'; ctx.fillStyle = '#fff';
   ctx.textAlign = reversed ? 'right' : 'left';
-  ctx.fillText(`${hp}`, reversed ? x + width - 4 : x + 4, barY + barH - 3);
+  ctx.fillText(`${hp}/${player.max_hp || 100}`, reversed ? x + width - 4 : x + 4, barY + barH - 3);
 }
 
 function drawRoundPips(x, y, score) {
@@ -260,7 +494,7 @@ function drawCharacter(ctx, player) {
     case 'jump':     drawJump(ctx, x, y, color); break;
     case 'attack_z': drawAttackZ(ctx, x, y, color); break;
     case 'attack_x': drawAttackX(ctx, x, y, color); break;
-    case 'attack_c': drawAttackC(ctx, x, y, color, tick); break;
+    case 'attack_c': drawAttackC(ctx, x, y, color, tick, player.character); break;
     case 'hit':      drawHit(ctx, x, y, color); break;
     case 'dead':     drawDead(ctx, x, y, color); break;
     case 'block':    drawBlock(ctx, x, y, color); break;
@@ -366,27 +600,103 @@ function drawAttackX(ctx, x, y, color) {
   head(ctx, x, y - 64, 13, color);
 }
 
-function drawAttackC(ctx, x, y, color, tick) {
-  const lunge = 10;
-  limb(ctx, x - 6, y - 20, x - 8, y, color, 8);
-  limb(ctx, x + 6, y - 20, x + 14, y, color, 8);
-  body(ctx, x + lunge, y - 52, 32, 22, color);
-  limb(ctx, x + lunge - 11, y - 46, x + lunge - 16, y - 42, color, 7);
-  limb(ctx, x + lunge + 11, y - 46, x + lunge + 44, y - 46, color, 7);
+function drawAttackC(ctx, x, y, color, tick, character) {
+  if (character === 'Ninja')  { drawNinjaSpecial(ctx, x, y, color, tick); return; }
+  if (character === 'Boxer')  { drawBoxerSpecial(ctx, x, y, color, tick); return; }
+  drawFighterSpecial(ctx, x, y, color, tick); // Fighter 장풍 포즈
+}
 
-  const p = Math.sin(tick * 0.4) * 4;
+// Fighter: 두 손 모아 기 모으는 포즈 (장풍은 서버에서 projectile로 처리)
+function drawFighterSpecial(ctx, x, y, color, tick) {
   const [r, g, b] = hexRgb(color);
-  ctx.save();
-  ctx.shadowColor = color; ctx.shadowBlur = 20 + p;
-  ctx.fillStyle = color;
-  ctx.beginPath(); ctx.arc(x + lunge + 58, y - 46, 10 + p, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
+  const pulse = Math.sin(tick * 0.35) * 3;
 
-  for (let i = 1; i <= 3; i++) {
-    ctx.strokeStyle = `rgba(${r},${g},${b},${1 - i * 0.3})`; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(x + lunge + 58, y - 46, 10 + i * 10 + p, 0, Math.PI * 2); ctx.stroke();
+  limb(ctx, x - 6, y - 20, x - 10, y, color, 8);
+  limb(ctx, x + 6, y - 20, x + 10, y, color, 8);
+  body(ctx, x, y - 52, 32, 22, color);
+  // 두 팔 앞으로 뻗어 합장
+  limb(ctx, x - 11, y - 44, x + 26, y - 46, color, 8);
+  limb(ctx, x + 11, y - 44, x + 26, y - 42, color, 8);
+  // 손끝 에너지
+  ctx.save();
+  ctx.shadowColor = color; ctx.shadowBlur = 18 + pulse;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(x + 30, y - 44, 5 + pulse * 0.5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(x + 30, y - 44, 9 + pulse, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  // 링 이펙트
+  for (let i = 1; i <= 2; i++) {
+    ctx.strokeStyle = `rgba(${r},${g},${b},${0.5 - i * 0.15})`; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x + 30, y - 44, 9 + pulse + i * 9, 0, Math.PI * 2); ctx.stroke();
   }
-  head(ctx, x + lunge, y - 64, 13, color);
+  head(ctx, x, y - 64, 13, color);
+}
+
+// Ninja: 잔상 남기며 순간이동 포즈
+function drawNinjaSpecial(ctx, x, y, color, tick) {
+  const [r, g, b] = hexRgb(color);
+  // 잔상 2개
+  for (let i = 1; i <= 2; i++) {
+    ctx.save();
+    ctx.globalAlpha = 0.18 * (3 - i);
+    drawIdle(ctx, x - i * 22, y, color, tick);
+    ctx.restore();
+  }
+  // 속도선
+  ctx.strokeStyle = `rgba(${r},${g},${b},0.5)`; ctx.lineWidth = 2;
+  for (let i = 0; i < 4; i++) {
+    ctx.beginPath();
+    ctx.moveTo(x - 18 - i * 14, y - 20 - i * 8);
+    ctx.lineTo(x - 36 - i * 14, y - 20 - i * 8);
+    ctx.stroke();
+  }
+  // 본체 — 공격 자세
+  limb(ctx, x - 5, y - 18, x - 8, y, color, 8);
+  limb(ctx, x + 5, y - 18, x + 8, y, color, 8);
+  body(ctx, x, y - 50, 28, 20, color);
+  limb(ctx, x - 10, y - 44, x - 18, y - 52, color, 7);
+  limb(ctx, x + 10, y - 44, x + 34, y - 40, color, 8);
+  // 주먹 이펙트
+  ctx.save();
+  ctx.shadowColor = color; ctx.shadowBlur = 14;
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(x + 36, y - 40, 7, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  head(ctx, x + 3, y - 62, 12, color);
+}
+
+// Boxer: 점프 슈퍼 어퍼컷
+function drawBoxerSpecial(ctx, x, y, color, tick) {
+  const [r, g, b] = hexRgb(color);
+  const lift = Math.max(0, Math.sin(tick * 0.18) * 10);
+  // 다리 접음
+  limb(ctx, x - 6, y - 22 - lift, x - 18, y - 12 - lift, color, 8);
+  limb(ctx, x + 6, y - 22 - lift, x + 18, y - 12 - lift, color, 8);
+  // 몸
+  ctx.save();
+  ctx.translate(x, y - 44 - lift); ctx.rotate(0.18);
+  body(ctx, 0, -14, 32, 22, color);
+  ctx.restore();
+  // 어퍼컷 팔 (위로 뻗음)
+  limb(ctx, x + 10, y - 48 - lift, x + 16, y - 78 - lift, color, 10);
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(x + 18, y - 80 - lift, 9, 0, Math.PI * 2); ctx.fill();
+  // 주먹 임팩트 라인
+  ctx.save();
+  ctx.shadowColor = color; ctx.shadowBlur = 22;
+  ctx.strokeStyle = `rgba(${r},${g},${b},0.85)`; ctx.lineWidth = 3;
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(x + 18 + Math.cos(a) * 9, y - 80 - lift + Math.sin(a) * 9);
+    ctx.lineTo(x + 18 + Math.cos(a) * 20, y - 80 - lift + Math.sin(a) * 20);
+    ctx.stroke();
+  }
+  ctx.restore();
+  // 반대 팔 (밸런스)
+  limb(ctx, x - 10, y - 48 - lift, x - 22, y - 40 - lift, color, 7);
+  head(ctx, x, y - 66 - lift, 13, color);
 }
 
 function drawHit(ctx, x, y, color) {

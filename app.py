@@ -26,7 +26,8 @@ database.init_db()
 # slot_dict = {'nickname': str, 'character': str|None, 'sid': str|None}
 rooms = {}
 rooms_lock = threading.Lock()
-sid_to = {}   # sid -> (room_id, player_num)
+sid_to = {}        # sid -> (room_id, player_num)
+spectators = {}    # room_id -> set of sids
 
 CHARACTER_COLORS = {
     'Fighter': '#4FC3F7',
@@ -65,6 +66,10 @@ def on_connect():
 @socketio.on('disconnect')
 def on_disconnect():
     sid = request.sid
+    # 관전자 정리
+    for rid in list(spectators.keys()):
+        spectators[rid].discard(sid)
+
     with rooms_lock:
         info = sid_to.pop(sid, None)
     if not info:
@@ -96,6 +101,10 @@ def _cleanup_slot(room_id, player_num):
         room['slots'].pop(player_num, None)
         room['stop_loop'] = True
 
+        # 솔로 방은 봇 슬롯(sid=None)이 남아 방이 삭제되지 않으므로 함께 제거
+        if room.get('solo'):
+            room['slots'].clear()
+
     socketio.emit('opponent_left', {}, room=room_id)
 
     with rooms_lock:
@@ -124,6 +133,41 @@ def on_create_room(data):
 
     join_room(room_id)
     emit('room_created', {'room_id': room_id, 'player_num': 1})
+
+
+@socketio.on('create_solo_room')
+def on_create_solo_room(data):
+    nickname   = str(data.get('nickname', 'Player')).strip()[:20] or 'Player'
+    difficulty = data.get('difficulty', 'normal')
+    if difficulty not in ('easy', 'normal', 'hard'):
+        difficulty = 'normal'
+    sid = request.sid
+
+    BOT_CHARS = {'easy': 'Fighter', 'normal': 'Ninja', 'hard': 'Boxer'}
+    BOT_NICKS = {'easy': '봇(쉬움)', 'normal': '봇(보통)', 'hard': '봇(어려움)'}
+    bot_char = BOT_CHARS[difficulty]
+    bot_nick = BOT_NICKS[difficulty]
+
+    with rooms_lock:
+        room_id = make_room_id()
+        while room_id in rooms:
+            room_id = make_room_id()
+
+        rooms[room_id] = {
+            'slots': {
+                1: {'nickname': nickname,  'character': None,     'sid': sid},
+                2: {'nickname': bot_nick,  'character': bot_char, 'sid': None},
+            },
+            'game': None, 'loop_thread': None,
+            'phase': 'select', 'stop_loop': False,
+            'background': 'city',
+            'solo': True, 'difficulty': difficulty,
+        }
+        sid_to[sid] = (room_id, 1)
+
+    join_room(room_id)
+    emit('character_select', {'player_num': 1, 'room_id': room_id,
+                              'solo': True, 'difficulty': difficulty, 'bot_nick': bot_nick})
 
 
 @socketio.on('join_room')
@@ -164,13 +208,13 @@ def on_reconnect(data):
 
     with rooms_lock:
         if room_id not in rooms:
-            emit('error', {'msg': '방이 존재하지 않습니다.'})
+            emit('reconnect_failed', {'msg': '방이 만료되었습니다.'})
             return
 
         room = rooms[room_id]
         slot = room['slots'].get(player_num)
         if not slot or slot['nickname'] != nickname:
-            emit('error', {'msg': '재연결 실패.'})
+            emit('reconnect_failed', {'msg': '재연결 실패.'})
             return
 
         old_sid = slot['sid']
@@ -185,7 +229,31 @@ def on_reconnect(data):
     if phase == 'select':
         emit('character_select', {'player_num': player_num})
     elif phase == 'game':
-        emit('game_start', {'player_num': player_num})
+        with rooms_lock:
+            bg = rooms.get(room_id, {}).get('background', 'city')
+        emit('game_start', {'player_num': player_num, 'background': bg})
+
+
+@socketio.on('preview_character')
+def on_preview_character(data):
+    sid = request.sid
+    with rooms_lock:
+        info = sid_to.get(sid)
+        if not info:
+            return
+        room_id, player_num = info
+        if room_id not in rooms:
+            return
+        slots = rooms[room_id]['slots']
+        other_num = 2 if player_num == 1 else 1
+        other_slot = slots.get(other_num)
+        other_sid = other_slot['sid'] if other_slot else None
+
+    if other_sid:
+        socketio.emit('opponent_preview', {
+            'player_num': player_num,
+            'character': data.get('character', ''),
+        }, room=other_sid)
 
 
 @socketio.on('select_character')
@@ -197,7 +265,8 @@ def on_select_character(data):
         return
     room_id, player_num = info
 
-    character = data.get('character', 'Fighter')
+    character  = data.get('character', 'Fighter')
+    background = data.get('background', 'city')
     should_start = False
 
     with rooms_lock:
@@ -207,6 +276,8 @@ def on_select_character(data):
         slot = room['slots'].get(player_num)
         if slot:
             slot['character'] = character
+            if player_num == 1:
+                room['background'] = background
         slots = room['slots']
         if (len(slots) == 2
                 and slots.get(1) and slots[1].get('character')
@@ -226,15 +297,22 @@ def _start_game(room_id):
         s1, s2 = slots[1], slots[2]
         p1_color = CHARACTER_COLORS.get(s1['character'], '#4FC3F7')
         p2_color = CHARACTER_COLORS.get(s2['character'], '#66BB6A')
+        is_solo   = room.get('solo', False)
+        difficulty = room.get('difficulty', 'normal') if is_solo else None
         room['game'] = game_logic.GameRoom(
             room_id, s1['nickname'], s2['nickname'], p1_color, p2_color,
+            s1['character'], s2['character'],
+            bot_difficulty=difficulty,
         )
         room['phase'] = 'game'
         room['stop_loop'] = False
-        p1_sid, p2_sid = s1['sid'], s2['sid']
+        p1_sid = s1['sid']
+        p2_sid = s2['sid']  # 솔로면 None
+        bg = room.get('background', 'city')
 
-    socketio.emit('game_start', {'player_num': 1}, room=p1_sid)
-    socketio.emit('game_start', {'player_num': 2}, room=p2_sid)
+    socketio.emit('game_start', {'player_num': 1, 'background': bg}, room=p1_sid)
+    if p2_sid:
+        socketio.emit('game_start', {'player_num': 2, 'background': bg}, room=p2_sid)
 
     t = threading.Thread(target=_game_loop, args=(room_id,), daemon=True)
     with rooms_lock:
@@ -243,49 +321,85 @@ def _start_game(room_id):
 
 
 def _game_loop(room_id):
-    while True:
-        with rooms_lock:
-            room = rooms.get(room_id)
-            if not room or room.get('stop_loop'):
-                break
-            game = room.get('game')
-            if not game or not game.active:
-                break
+    try:
+        while True:
+            with rooms_lock:
+                room = rooms.get(room_id)
+                if not room or room.get('stop_loop'):
+                    break
+                game = room.get('game')
+                if not game or not game.active:
+                    break
 
-        result = game.update()
+            result = game.update()
 
-        if result:
-            if result.get('game_over'):
-                socketio.emit('game_over', {
-                    'winner': result['winner'],
-                    'winner_nick': result['winner_nick'],
-                    'loser_nick': result['loser_nick'],
-                    'scores': result['scores'],
-                }, room=room_id)
-                database.save_result(result['winner_nick'], result['loser_nick'])
-                with rooms_lock:
-                    if room_id in rooms:
-                        rooms[room_id]['phase'] = 'done'
-                        rooms.pop(room_id, None)
-                break
+            if result:
+                if result.get('game_over'):
+                    socketio.emit('game_over', {
+                        'winner': result['winner'],
+                        'winner_nick': result['winner_nick'],
+                        'loser_nick': result['loser_nick'],
+                        'scores': result['scores'],
+                    }, room=room_id)
+                    try:
+                        database.save_result(result['winner_nick'], result['loser_nick'])
+                    except Exception:
+                        pass
+                    with rooms_lock:
+                        if room_id in rooms:
+                            rooms[room_id]['phase'] = 'done'
+                            rooms.pop(room_id, None)
+                    break
+                else:
+                    socketio.emit('round_end', {
+                        'winner': result.get('winner', 0),
+                        'scores': result['scores'],
+                        'round': result['round'],
+                        'draw': result.get('draw', False),
+                    }, room=room_id)
+                    time.sleep(3)
+                    with rooms_lock:
+                        if room_id not in rooms:
+                            break
+                        rooms[room_id]['game'].start_next_round()
+                        next_round = rooms[room_id]['game'].round_num
+                    socketio.emit('round_start', {'round': next_round}, room=room_id)
             else:
-                socketio.emit('round_end', {
-                    'winner': result.get('winner', 0),
-                    'scores': result['scores'],
-                    'round': result['round'],
-                    'draw': result.get('draw', False),
-                }, room=room_id)
-                time.sleep(3)
-                with rooms_lock:
-                    if room_id not in rooms:
-                        break
-                    rooms[room_id]['game'].start_next_round()
-                    next_round = rooms[room_id]['game'].round_num
-                socketio.emit('round_start', {'round': next_round}, room=room_id)
-        else:
-            socketio.emit('game_state', game.state_dict(), room=room_id)
+                socketio.emit('game_state', game.state_dict(), room=room_id)
 
-        time.sleep(1 / 30)
+            time.sleep(1 / 30)
+    except Exception:
+        # 예외 발생 시에도 방 반드시 삭제
+        with rooms_lock:
+            if room_id in rooms:
+                rooms.pop(room_id, None)
+
+
+@socketio.on('chat_message')
+def on_chat_message(data):
+    sid = request.sid
+    with rooms_lock:
+        info = sid_to.get(sid)
+    if not info:
+        return
+    room_id, player_num = info
+
+    with rooms_lock:
+        room = rooms.get(room_id)
+        if not room:
+            return
+        slot = room['slots'].get(player_num)
+        nickname = slot['nickname'] if slot else 'Unknown'
+
+    msg = str(data.get('msg', '')).strip()[:100]
+    if not msg:
+        return
+
+    socketio.emit('chat_message', {
+        'nickname': nickname,
+        'msg': msg,
+        'player_num': player_num,
+    }, room=room_id)
 
 
 @socketio.on('player_input')
@@ -307,6 +421,66 @@ def on_player_input(data):
         player = game.players[player_num - 1]
 
     player.keys = data.get('keys', {})
+
+
+def _get_room_list():
+    result = []
+    with rooms_lock:
+        for rid, room in rooms.items():
+            if room['phase'] in ('done',):
+                continue
+            slots = room['slots']
+            # 실제 접속 중인 사람이 한 명도 없으면 목록에서 제외
+            if not any(s.get('sid') for s in slots.values()):
+                continue
+            game  = room.get('game')
+            result.append({
+                'room_id': rid,
+                'phase':   room['phase'],
+                'solo':    room.get('solo', False),
+                'p1':      slots.get(1, {}).get('nickname', '?'),
+                'p2':      slots.get(2, {}).get('nickname', '?'),
+                'scores':  game.scores[:] if game else [0, 0],
+                'round':   game.round_num if game else 1,
+            })
+    return result
+
+
+@socketio.on('get_rooms')
+def on_get_rooms():
+    emit('rooms_list', {'rooms': _get_room_list()})
+
+
+@socketio.on('spectate')
+def on_spectate(data):
+    room_id = str(data.get('room_id', '')).upper()
+    sid = request.sid
+
+    with rooms_lock:
+        room = rooms.get(room_id)
+        if not room or room['phase'] != 'game':
+            emit('spec_error', {'msg': '관전할 수 없는 방입니다.'})
+            return
+        bg    = room.get('background', 'city')
+        slots = room['slots']
+        p1_nick = slots.get(1, {}).get('nickname', '?')
+        p2_nick = slots.get(2, {}).get('nickname', '?')
+        game = room.get('game')
+        scores = game.scores[:] if game else [0, 0]
+
+    join_room(room_id)
+    if room_id not in spectators:
+        spectators[room_id] = set()
+    spectators[room_id].add(sid)
+
+    emit('game_start', {
+        'player_num': 0,
+        'spectator':  True,
+        'background': bg,
+        'p1_nick':    p1_nick,
+        'p2_nick':    p2_nick,
+        'scores':     scores,
+    })
 
 
 @socketio.on('get_ranking')
