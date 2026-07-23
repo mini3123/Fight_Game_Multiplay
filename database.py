@@ -18,9 +18,19 @@ def init_db():
                 nickname TEXT UNIQUE NOT NULL,
                 wins INTEGER DEFAULT 0,
                 losses INTEGER DEFAULT 0,
+                points INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        # 기존 DB 마이그레이션: points 컬럼 없으면 추가
+        try:
+            conn.execute('ALTER TABLE players ADD COLUMN points INTEGER DEFAULT 0')
+        except Exception:
+            pass
+        # 점수 기능 추가 전 게임 소급 적용: wins>0인데 points=0이면 wins*3 지급
+        conn.execute(
+            'UPDATE players SET points = wins * 3 WHERE points = 0 AND wins > 0'
+        )
         conn.execute('''
             CREATE TABLE IF NOT EXISTS match_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,11 +55,11 @@ def save_result(winner_nick, loser_nick):
         ensure_player(conn, winner_nick)
         ensure_player(conn, loser_nick)
         conn.execute(
-            'UPDATE players SET wins = wins + 1 WHERE nickname = ?',
+            'UPDATE players SET wins = wins + 1, points = points + 3 WHERE nickname = ?',
             (winner_nick,)
         )
         conn.execute(
-            'UPDATE players SET losses = losses + 1 WHERE nickname = ?',
+            'UPDATE players SET losses = losses + 1, points = MAX(0, points - 1) WHERE nickname = ?',
             (loser_nick,)
         )
         conn.execute(
@@ -62,11 +72,11 @@ def save_result(winner_nick, loser_nick):
 def get_ranking():
     with get_conn() as conn:
         rows = conn.execute('''
-            SELECT nickname, wins, losses,
+            SELECT nickname, wins, losses, points,
                    ROUND(wins * 100.0 / (wins + losses), 1) AS win_rate
             FROM players
             WHERE (wins + losses) > 0
-            ORDER BY win_rate DESC, wins DESC
+            ORDER BY points DESC, wins DESC
             LIMIT 10
         ''').fetchall()
     return [dict(r) for r in rows]

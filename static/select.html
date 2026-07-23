@@ -98,6 +98,16 @@
     <div class="char-name">조현우</div>
     <div class="char-desc">강력한 복서</div>
   </div>
+  <div class="char-card" id="card-Wizard" style="--char-color:#CE93D8" onclick="selectChar('Wizard')">
+    <canvas class="char-canvas" id="canvas-Wizard" width="100" height="120"></canvas>
+    <div class="char-name">김창조</div>
+    <div class="char-desc">낙하 마탄 마법사</div>
+  </div>
+  <div class="char-card" id="card-Tank" style="--char-color:#78909C" onclick="selectChar('Tank')">
+    <canvas class="char-canvas" id="canvas-Tank" width="100" height="120"></canvas>
+    <div class="char-name">박정민</div>
+    <div class="char-desc">체력회복 탱커</div>
+  </div>
 </div>
 
 <div class="bg-section" id="bg-section">
@@ -137,12 +147,14 @@
 <p class="info-text" id="info-text">캐릭터를 선택한 뒤 확인 버튼을 누르세요.</p>
 
 <script>
-const COLORS     = { Fighter: '#4FC3F7', Ninja: '#66BB6A', Boxer: '#EF5350' };
-const CHAR_NAMES = { Fighter: '하원준',   Ninja: '전승우',   Boxer: '조현우'  };
+const COLORS     = { Fighter: '#4FC3F7', Ninja: '#66BB6A', Boxer: '#EF5350', Wizard: '#CE93D8', Tank: '#78909C' };
+const CHAR_NAMES = { Fighter: '하원준',   Ninja: '전승우',   Boxer: '조현우',   Wizard: '김창조',   Tank: '박정민'  };
 const STATS = {
   Fighter: { hp: 60, speed: 60, power: 60, cooldown: '10초' },
   Ninja:   { hp: 45, speed: 95, power: 45, cooldown: '6초'  },
   Boxer:   { hp: 90, speed: 35, power: 90, cooldown: '14초' },
+  Wizard:  { hp: 55, speed: 58, power: 70, cooldown: '7초'  },
+  Tank:    { hp: 99, speed: 22, power: 80, cooldown: '18초' },
 };
 
 const nickname  = sessionStorage.getItem('nickname')   || 'Player';
@@ -242,7 +254,7 @@ function drawPreview(name, color) {
   ctx.fillRect(cx - 12, 72, 24, 6);
 }
 
-['Fighter', 'Ninja', 'Boxer'].forEach(n => {
+['Fighter', 'Ninja', 'Boxer', 'Wizard', 'Tank'].forEach(n => {
   drawPreview(n, COLORS[n]);
   drawStats(n);
 });

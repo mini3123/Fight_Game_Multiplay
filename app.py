@@ -14,6 +14,9 @@ app = Flask(__name__, static_folder='static')
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-prod')
 socketio = SocketIO(app, async_mode='threading', cors_allowed_origins='*')
 
+GAME_TICK_HZ = 30
+STATE_BROADCAST_HZ = 20
+
 database.init_db()
 
 # rooms[room_id] = {
@@ -33,6 +36,8 @@ CHARACTER_COLORS = {
     'Fighter': '#4FC3F7',
     'Ninja':   '#66BB6A',
     'Boxer':   '#EF5350',
+    'Wizard':  '#CE93D8',
+    'Tank':    '#78909C',
 }
 
 
@@ -70,33 +75,40 @@ def on_disconnect():
     for rid in list(spectators.keys()):
         spectators[rid].discard(sid)
 
+    gen = None
+    room_id = None
+    player_num = None
     with rooms_lock:
         info = sid_to.pop(sid, None)
-    if not info:
-        return
-    room_id, player_num = info
-
-    with rooms_lock:
+        if not info:
+            return
+        room_id, player_num = info
         if room_id not in rooms:
             return
         slot = rooms[room_id]['slots'].get(player_num)
-        if slot:
+        # sid가 이미 새 연결로 교체됐으면 타이머 시작 안 함
+        if slot and slot['sid'] == sid:
             slot['sid'] = None
+            slot['_gen'] = slot.get('_gen', 0) + 1
+            gen = slot['_gen']
 
-    # Grace period: clean up if player doesn't reconnect within 10 s
-    t = threading.Timer(10.0, _cleanup_slot, args=(room_id, player_num))
+    if gen is None:
+        return
+    # Grace period: 10초 안에 재연결 안 하면 정리
+    t = threading.Timer(10.0, _cleanup_slot, args=(room_id, player_num, gen))
     t.daemon = True
     t.start()
 
 
-def _cleanup_slot(room_id, player_num):
+def _cleanup_slot(room_id, player_num, gen):
     with rooms_lock:
         if room_id not in rooms:
             return
         room = rooms[room_id]
         slot = room['slots'].get(player_num)
-        if not slot or slot['sid'] is not None:
-            return  # Player reconnected within grace period
+        # sid가 복구됐거나 더 최신 타이머가 있으면 무시
+        if not slot or slot['sid'] is not None or slot.get('_gen', 0) != gen:
+            return
 
         room['slots'].pop(player_num, None)
         room['stop_loop'] = True
@@ -273,6 +285,8 @@ def on_select_character(data):
         if room_id not in rooms:
             return
         room = rooms[room_id]
+        if room['phase'] != 'select':
+            return
         slot = room['slots'].get(player_num)
         if slot:
             slot['character'] = character
@@ -291,7 +305,8 @@ def on_select_character(data):
 def _start_game(room_id):
     with rooms_lock:
         room = rooms.get(room_id)
-        if not room:
+        # 선택 완료 이벤트가 중복 도착해도 게임 루프는 방마다 하나만 만든다.
+        if not room or room['phase'] != 'select':
             return
         slots = room['slots']
         s1, s2 = slots[1], slots[2]
@@ -321,8 +336,13 @@ def _start_game(room_id):
 
 
 def _game_loop(room_id):
+    tick_interval = 1.0 / GAME_TICK_HZ
+    broadcast_interval = 1.0 / STATE_BROADCAST_HZ
+    next_broadcast = time.monotonic()
     try:
         while True:
+            t0 = time.monotonic()
+
             with rooms_lock:
                 room = rooms.get(room_id)
                 if not room or room.get('stop_loop'):
@@ -364,10 +384,18 @@ def _game_loop(room_id):
                         rooms[room_id]['game'].start_next_round()
                         next_round = rooms[room_id]['game'].round_num
                     socketio.emit('round_start', {'round': next_round}, room=room_id)
-            else:
+            elif t0 >= next_broadcast:
                 socketio.emit('game_state', game.state_dict(), room=room_id)
+                # 30Hz 게임 틱과 독립된 평균 20Hz 일정으로 전송한다.
+                next_broadcast += broadcast_interval
+                if next_broadcast < t0:
+                    next_broadcast = t0 + broadcast_interval
 
-            time.sleep(1 / 30)
+            # 틱 소요 시간을 빼고 정확히 30fps 유지
+            elapsed = time.monotonic() - t0
+            wait = tick_interval - elapsed
+            if wait > 0:
+                time.sleep(wait)
     except Exception:
         # 예외 발생 시에도 방 반드시 삭제
         with rooms_lock:
@@ -429,6 +457,9 @@ def _get_room_list():
         for rid, room in rooms.items():
             if room['phase'] in ('done',):
                 continue
+            # 봇전(솔로) 방은 로비에 표시하지 않음
+            if room.get('solo'):
+                continue
             slots = room['slots']
             # 실제 접속 중인 사람이 한 명도 없으면 목록에서 제외
             if not any(s.get('sid') for s in slots.values()):
@@ -469,18 +500,20 @@ def on_spectate(data):
         scores = game.scores[:] if game else [0, 0]
 
     join_room(room_id)
-    if room_id not in spectators:
-        spectators[room_id] = set()
-    spectators[room_id].add(sid)
+    with rooms_lock:
+        if room_id not in spectators:
+            spectators[room_id] = set()
+        spectators[room_id].add(sid)
 
-    emit('game_start', {
+    # to=sid 를 명시해 join_room 이후에도 방 전체가 아닌 관전자에게만 전송
+    socketio.emit('game_start', {
         'player_num': 0,
         'spectator':  True,
         'background': bg,
         'p1_nick':    p1_nick,
         'p2_nick':    p2_nick,
         'scores':     scores,
-    })
+    }, to=sid)
 
 
 @socketio.on('get_ranking')

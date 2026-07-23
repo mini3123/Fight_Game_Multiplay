@@ -224,10 +224,10 @@
   </div>
 
   <div class="card rank-wide">
-    <h2>랭킹 (Top 10)</h2>
+    <h2>랭킹 (Top 10) <span style="font-size:.75rem;color:#555;font-weight:400">승리 +3점 · 패배 -1점</span></h2>
     <table>
       <thead>
-        <tr><th class="rank-num">#</th><th>닉네임</th><th>승</th><th>패</th><th>승률</th></tr>
+        <tr><th class="rank-num">#</th><th>닉네임</th><th>점수</th><th>승</th><th>패</th></tr>
       </thead>
       <tbody id="ranking-body">
         <tr><td colspan="5" class="empty-row">불러오는 중...</td></tr>
@@ -323,6 +323,7 @@ socket.on('room_created', data => {
 socket.on('character_select', data => {
   sessionStorage.setItem('player_num', String(data.player_num));
   sessionStorage.setItem('nickname', myNickname);
+  sessionStorage.setItem('spectator', 'false');
   if (data.room_id) sessionStorage.setItem('room_id', data.room_id);
   window.location.href = '/select.html';
 });
@@ -402,9 +403,9 @@ function renderRanking(rows) {
     <tr>
       <td class="rank-num">${i + 1}</td>
       <td>${esc(r.nickname)}</td>
+      <td class="win-rate">${r.points ?? 0}</td>
       <td>${r.wins}</td>
       <td>${r.losses}</td>
-      <td class="win-rate">${r.win_rate}%</td>
     </tr>`).join('');
 }
 
